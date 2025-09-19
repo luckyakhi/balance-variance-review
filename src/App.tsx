@@ -225,17 +225,6 @@ function VarianceTable({ rows }:{rows: VarianceRow[]}){
                             <span>Last updated {r.lastUpdated}</span>
                           </div>
                         </div>
-                        <div className="grid gap-4 md:grid-cols-4">
-                          <StatCard label="Prior" value={fmtINR(r.prior)} />
-                          <StatCard label="Current" value={fmtINR(r.current)} />
-                          <StatCard label="Abs Variance" value={fmtINR(r.current - r.prior)} sub={`Threshold ${r.thresholdPct}%`} />
-                          <div className="rounded-2xl border border-gray-200 bg-white p-4 text-gray-600">
-                            <div className="text-xs uppercase tracking-wide text-gray-500">7-day Variance Trend</div>
-                            <div className="mt-3 text-emerald-600">
-                              <MiniTrend values={[10,12,8,16,20,14,18]} />
-                            </div>
-                          </div>
-                        </div>
                         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
                           <div className="flex items-center justify-between border-b bg-gray-50 px-4 py-3">
                             <div className="text-sm font-medium text-gray-700">Underlying Transactions ({state.txns.length})</div>
@@ -298,16 +287,6 @@ function VarianceTable({ rows }:{rows: VarianceRow[]}){
       </table>
     </div>
   );
-}
-
-function MiniTrend({ values }:{values:number[]}){
-  const max = Math.max(...values);
-  const points = values.map((v,i)=>`${(i/(values.length-1))*100},${100 - (v/max)*100}`).join(' ');
-  return (
-    <svg viewBox="0 0 100 100" className="h-16 w-full">
-      <polyline fill="none" strokeWidth="2" points={points} stroke="currentColor" />
-    </svg>
-  )
 }
 
 export default function App(){
