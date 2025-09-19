@@ -68,13 +68,23 @@ function Toolbar(props: any){
   )
 }
 
-function VarianceTable({ rows, onOpen }:{rows: VarianceRow[]; onOpen:(row:VarianceRow)=>void}){
+type ExpandedRowState = {
+  open: boolean;
+  loading: boolean;
+  txns: Txn[];
+  page: number;
+};
+
+function VarianceTable({ rows }:{rows: VarianceRow[]}){
   const [sort,setSort] = useState<{key: keyof VarianceRow | 'absVar' | '%Var'; dir:'asc'|'desc'}>({key:'absVar', dir:'desc'});
+  const [expandedRows, setExpandedRows] = useState<Record<string, ExpandedRowState>>({});
+  const pageSize = 8;
+
   const computed = useMemo(()=>{
     const withCalc = rows.map(r=>{
       const absVar = r.current - r.prior;
       const varPct = pct(absVar, Math.abs(r.prior)) * (absVar>=0?1:-1);
-      return {...r, absVar, varPct}
+      return {...r, absVar, varPct};
     });
     const sorted = [...withCalc].sort((a:any,b:any)=>{
       const key = sort.key==='absVar' ? 'absVar' : sort.key==='%Var' ? 'varPct' : sort.key;
@@ -85,6 +95,83 @@ function VarianceTable({ rows, onOpen }:{rows: VarianceRow[]; onOpen:(row:Varian
     });
     return sorted;
   },[rows, sort]);
+
+  const handleToggle = (row: VarianceRow) => {
+    const current = expandedRows[row.id];
+    const nextOpen = !(current?.open);
+    const shouldFetch = nextOpen && (!current || current.txns.length === 0);
+
+    setExpandedRows(prev => ({
+      ...prev,
+      [row.id]: {
+        open: nextOpen,
+        loading: shouldFetch,
+        txns: current?.txns ?? [],
+        page: nextOpen ? 1 : (current?.page ?? 1),
+      },
+    }));
+
+    if (shouldFetch) {
+      fetchTransactions(row.id)
+        .then(txns => {
+          setExpandedRows(prev => {
+            const existing = prev[row.id];
+            if (!existing) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [row.id]: {
+                ...existing,
+                loading: false,
+                txns,
+                page: 1,
+              },
+            };
+          });
+        })
+        .catch(() => {
+          setExpandedRows(prev => {
+            const existing = prev[row.id];
+            if (!existing) {
+              return prev;
+            }
+            return {
+              ...prev,
+              [row.id]: {
+                ...existing,
+                loading: false,
+                txns: [],
+              },
+            };
+          });
+        });
+    }
+  };
+
+  const changePage = (rowId: string, delta: number) => {
+    setExpandedRows(prev => {
+      const entry = prev[rowId];
+      if (!entry) return prev;
+      const pages = Math.max(1, Math.ceil(entry.txns.length / pageSize));
+      const safePage = Math.min(entry.page, pages);
+      const nextPage = Math.min(pages, Math.max(1, safePage + delta));
+      if (nextPage === entry.page) {
+        if (entry.page !== safePage) {
+          return {
+            ...prev,
+            [rowId]: { ...entry, page: safePage },
+          };
+        }
+        return prev;
+      }
+      return {
+        ...prev,
+        [rowId]: { ...entry, page: nextPage },
+      };
+    });
+  };
+
   return (
     <div className="rounded-2xl border border-gray-200 bg-white">
       <table className="w-full table-fixed">
@@ -101,27 +188,116 @@ function VarianceTable({ rows, onOpen }:{rows: VarianceRow[]; onOpen:(row:Varian
         <tbody className="divide-y divide-gray-100 text-sm">
           {computed.map((r)=>{
             const tone = r.status==='Breached'?'danger': r.status==='Investigate'?'warn':'ok';
+            const state = expandedRows[r.id] ?? { open: false, loading: false, txns: [], page: 1 };
+            const isExpanded = state.open;
+            const pages = Math.max(1, Math.ceil(state.txns.length / pageSize));
+            const safePage = Math.min(state.page, pages);
+            const start = (safePage - 1) * pageSize;
+            const paged = state.txns.slice(start, start + pageSize);
             return (
-              <tr key={r.id} className="hover:bg-amber-50/40">
-                <td className="px-3 py-2 font-medium text-gray-700">{r.entity}</td>
-                <td className="px-3 py-2 font-mono text-xs">{r.gl}</td>
-                <td className="px-3 py-2 text-gray-600">{r.description}</td>
-                <td className="px-3 py-2 tabular-nums">{fmtINR(r.prior)}</td>
-                <td className="px-3 py-2 tabular-nums">{fmtINR(r.current)}</td>
-                <td className={`px-3 py-2 tabular-nums font-medium ${(r.current - r.prior) >= 0 ? 'text-emerald-700':'text-red-700'}`}>{fmtINR(r.current - r.prior)}</td>
-                <td className={`px-3 py-2 tabular-nums ${(r as any).varPct >= 0 ? 'text-emerald-700':'text-red-700'}`}>{(r as any).varPct.toFixed(2)}%</td>
-                <td className="px-3 py-2 tabular-nums">{r.thresholdPct}%</td>
-                <td className="px-3 py-2"><Badge tone={tone as any}>{r.status}</Badge></td>
-                <td className="px-3 py-2">{r.owner}</td>
-                <td className="px-3 py-2 text-xs text-gray-500">{r.lastUpdated}</td>
-                <td className="px-3 py-2 text-right"><button onClick={()=>onOpen(r)} className="rounded-lg border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50">View</button></td>
-              </tr>
-            )
+              <React.Fragment key={r.id}>
+                <tr className={`hover:bg-amber-50/40 ${isExpanded ? 'bg-amber-50/30' : ''}`}>
+                  <td className="px-3 py-2 font-medium text-gray-700">{r.entity}</td>
+                  <td className="px-3 py-2 font-mono text-xs">{r.gl}</td>
+                  <td className="px-3 py-2 text-gray-600">{r.description}</td>
+                  <td className="px-3 py-2 tabular-nums">{fmtINR(r.prior)}</td>
+                  <td className="px-3 py-2 tabular-nums">{fmtINR(r.current)}</td>
+                  <td className={`px-3 py-2 tabular-nums font-medium ${(r.current - r.prior) >= 0 ? 'text-emerald-700':'text-red-700'}`}>{fmtINR(r.current - r.prior)}</td>
+                  <td className={`px-3 py-2 tabular-nums ${(r as any).varPct >= 0 ? 'text-emerald-700':'text-red-700'}`}>{(r as any).varPct.toFixed(2)}%</td>
+                  <td className="px-3 py-2 tabular-nums">{r.thresholdPct}%</td>
+                  <td className="px-3 py-2"><Badge tone={tone as any}>{r.status}</Badge></td>
+                  <td className="px-3 py-2">{r.owner}</td>
+                  <td className="px-3 py-2 text-xs text-gray-500">{r.lastUpdated}</td>
+                  <td className="px-3 py-2 text-right"><button onClick={()=>handleToggle(r)} className="rounded-lg border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50">{isExpanded ? 'Hide' : 'View'}</button></td>
+                </tr>
+                {isExpanded && (
+                  <tr className="bg-gray-50">
+                    <td colSpan={12} className="px-6 py-4">
+                      <div className="space-y-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-xs uppercase tracking-wide text-gray-500">Drill-down</div>
+                            <div className="text-sm font-semibold text-gray-700">{r.gl} — {r.description}</div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+                            <Badge tone={tone as any}>{r.status}</Badge>
+                            <span>Owner: {r.owner}</span>
+                            <span>Last updated {r.lastUpdated}</span>
+                          </div>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-4">
+                          <StatCard label="Prior" value={fmtINR(r.prior)} />
+                          <StatCard label="Current" value={fmtINR(r.current)} />
+                          <StatCard label="Abs Variance" value={fmtINR(r.current - r.prior)} sub={`Threshold ${r.thresholdPct}%`} />
+                          <div className="rounded-2xl border border-gray-200 bg-white p-4 text-gray-600">
+                            <div className="text-xs uppercase tracking-wide text-gray-500">7-day Variance Trend</div>
+                            <div className="mt-3 text-emerald-600">
+                              <MiniTrend values={[10,12,8,16,20,14,18]} />
+                            </div>
+                          </div>
+                        </div>
+                        <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white">
+                          <div className="flex items-center justify-between border-b bg-gray-50 px-4 py-3">
+                            <div className="text-sm font-medium text-gray-700">Underlying Transactions ({state.txns.length})</div>
+                          </div>
+                          {state.loading ? (
+                            <div className="px-4 py-6 text-center text-sm text-gray-500">Loading transactions...</div>
+                          ) : (
+                            <>
+                              <div className="overflow-x-auto">
+                                <table className="w-full table-fixed text-sm">
+                                  <thead className="bg-white text-xs uppercase text-gray-500">
+                                    <tr>
+                                      <th className="px-3 py-2 text-left">Date</th>
+                                      <th className="px-3 py-2 text-left">Txn ID</th>
+                                      <th className="px-3 py-2 text-left">Narration</th>
+                                      <th className="px-3 py-2">DR/CR</th>
+                                      <th className="px-3 py-2 text-right">Amount</th>
+                                      <th className="px-3 py-2 text-left">Source</th>
+                                      <th className="px-3 py-2 text-left">Tags</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y">
+                                    {paged.map(t=> (
+                                      <tr key={t.id} className="hover:bg-gray-50">
+                                        <td className="px-3 py-2">{t.date}</td>
+                                        <td className="px-3 py-2 font-mono text-xs">{t.id}</td>
+                                        <td className="px-3 py-2 text-gray-600">{t.narrative}</td>
+                                        <td className="px-3 py-2 text-center"><Badge tone={t.drcr==='DR'?'danger':'ok'}>{t.drcr}</Badge></td>
+                                        <td className={`px-3 py-2 text-right tabular-nums ${t.drcr==='DR'?'text-red-700':'text-emerald-700'}`}>{fmtINR(t.amount)}</td>
+                                        <td className="px-3 py-2">{t.source}</td>
+                                        <td className="px-3 py-2 text-xs text-gray-500">{t.tags?.join(', ')}</td>
+                                      </tr>
+                                    ))}
+                                    {paged.length===0 && (
+                                      <tr>
+                                        <td className="px-3 py-6 text-center text-sm text-gray-400" colSpan={7}>No transactions</td>
+                                      </tr>
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                              <div className="flex items-center justify-between border-t bg-white px-4 py-3 text-sm text-gray-600">
+                                <div className="text-xs text-gray-500">Page {safePage} / {pages}</div>
+                                <div className="flex gap-2">
+                                  <button className="rounded-lg border px-3 py-1 text-xs disabled:opacity-40" disabled={safePage<=1} onClick={()=>changePage(r.id,-1)}>Prev</button>
+                                  <button className="rounded-lg border px-3 py-1 text-xs disabled:opacity-40" disabled={safePage>=pages} onClick={()=>changePage(r.id,1)}>Next</button>
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
           })}
         </tbody>
       </table>
     </div>
-  )
+  );
 }
 
 function MiniTrend({ values }:{values:number[]}){
@@ -134,128 +310,12 @@ function MiniTrend({ values }:{values:number[]}){
   )
 }
 
-function Drawer({ open, onClose, row }:{open:boolean; onClose:()=>void; row?:VarianceRow|null}){
-  const [page,setPage] = useState(1);
-  const [txns, setTxns] = useState<Txn[]>([]);
-  const pageSize = 8;
-  useEffect(()=>{
-    if(open && row){
-      fetchTransactions(row.id).then(setTxns);
-      setPage(1);
-    }
-  },[open, row?.id]);
-
-  const start = (page-1)*pageSize;
-  const end = start+pageSize;
-  const paged = txns.slice(start,end);
-  const pages = Math.max(1, Math.ceil(txns.length/pageSize));
-
-  return (
-    <div className={`fixed inset-0 z-50 ${open ? 'pointer-events-auto':'pointer-events-none'}`}>
-      <div className={`absolute inset-0 bg-black/30 transition-opacity ${open ? 'opacity-100':'opacity-0'}`} onClick={onClose} />
-      <div className={`absolute right-0 top-0 h-full w-full max-w-3xl transform bg-white shadow-2xl transition-transform duration-300 ${open ? 'translate-x-0':'translate-x-full'}`}>
-        <div className="flex items-center justify-between border-b p-4">
-          <div>
-            <div className="text-xs text-gray-500">Drill-down</div>
-            <div className="text-lg font-semibold">{row?.gl} — {row?.description}</div>
-          </div>
-          <button onClick={onClose} className="rounded-full border px-3 py-1 text-sm">Close</button>
-        </div>
-        <div className="grid grid-cols-3 gap-4 p-4">
-          <StatCard label="Prior" value={fmtINR(row?.prior ?? 0)} />
-          <StatCard label="Current" value={fmtINR(row?.current ?? 0)} />
-          <StatCard label="Abs Variance" value={fmtINR((row?.current ?? 0) - (row?.prior ?? 0))} sub={`Threshold ${row?.thresholdPct}%`} />
-        </div>
-        <div className="grid grid-cols-1 gap-4 px-4">
-          <div className="rounded-2xl border p-4">
-            <div className="mb-2 text-sm text-gray-600">7-day Variance Trend</div>
-            <MiniTrend values={[10,12,8,16,20,14,18]} />
-          </div>
-        </div>
-        <div className="px-4 pt-4 text-sm font-medium">Underlying Transactions ({txns.length})</div>
-        <div className="px-4 pb-4">
-          <div className="overflow-hidden rounded-2xl border">
-            <table className="w-full table-fixed text-sm">
-              <thead className="bg-gray-50 text-xs uppercase text-gray-500">
-                <tr>
-                  <th className="px-3 py-2 text-left">Date</th>
-                  <th className="px-3 py-2 text-left">Txn ID</th>
-                  <th className="px-3 py-2 text-left">Narration</th>
-                  <th className="px-3 py-2">DR/CR</th>
-                  <th className="px-3 py-2 text-right">Amount</th>
-                  <th className="px-3 py-2 text-left">Source</th>
-                  <th className="px-3 py-2 text-left">Tags</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {paged.map(t=> (
-                  <tr key={t.id} className="hover:bg-gray-50">
-                    <td className="px-3 py-2">{t.date}</td>
-                    <td className="px-3 py-2 font-mono text-xs">{t.id}</td>
-                    <td className="px-3 py-2 text-gray-600">{t.narrative}</td>
-                    <td className="px-3 py-2 text-center"><Badge tone={t.drcr==='DR'?'danger':'ok'}>{t.drcr}</Badge></td>
-                    <td className={`px-3 py-2 text-right tabular-nums ${t.drcr==='DR'?'text-red-700':'text-emerald-700'}`}>{fmtINR(t.amount)}</td>
-                    <td className="px-3 py-2">{t.source}</td>
-                    <td className="px-3 py-2 text-xs text-gray-500">{t.tags?.join(', ')}</td>
-                  </tr>
-                ))}
-                {paged.length===0 && (
-                  <tr>
-                    <td className="px-3 py-6 text-center text-sm text-gray-400" colSpan={7}>No transactions</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div className="mt-3 flex items-center justify-between text-sm">
-            <div className="text-gray-500">Page {page} / {pages}</div>
-            <div className="flex gap-2">
-              <button className="rounded-lg border px-3 py-1 disabled:opacity-40" disabled={page===1} onClick={()=>setPage(p=>Math.max(1,p-1))}>Prev</button>
-              <button className="rounded-lg border px-3 py-1 disabled:opacity-40" disabled={page===pages} onClick={()=>setPage(p=>Math.min(pages,p+1))}>Next</button>
-            </div>
-          </div>
-        </div>
-        <div className="grid grid-cols-2 gap-4 border-t p-4">
-          <div className="rounded-2xl border p-3">
-            <div className="text-sm font-medium">Reviewer Notes</div>
-            <textarea className="mt-2 h-24 w-full resize-none rounded-lg border p-2 text-sm" placeholder="Add commentary explaining the variance and reconciliation..." />
-            <div className="mt-2 flex items-center justify-end gap-2">
-              <button className="rounded-lg border px-3 py-1 text-sm">Save Draft</button>
-              <button className="rounded-lg bg-gray-900 px-3 py-1 text-sm text-white">Submit</button>
-            </div>
-          </div>
-          <div className="rounded-2xl border p-3">
-            <div className="text-sm font-medium">Workflow</div>
-            <div className="mt-2 grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <label className="text-xs text-gray-500">Assign To</label>
-                <input className="w-full rounded-lg border p-2" placeholder="e.g. john.doe" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">Status</label>
-                <select className="w-full rounded-lg border p-2">
-                  <option>Investigate</option>
-                  <option>In Progress</option>
-                  <option>Resolved</option>
-                </select>
-              </div>
-            </div>
-            <button className="mt-3 w-full rounded-lg border px-3 py-2 text-sm">Raise Exception</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function App(){
   const [entity,setEntity] = useState('ALL');
   const [date,setDate] = useState('2025-09-17');
   const [search,setSearch] = useState('');
   const [threshold,setThreshold] = useState(0);
   const [view,setView] = useState<'account'|'product'>('account');
-  const [drawerOpen,setDrawerOpen] = useState(false);
-  const [selected,setSelected] = useState<VarianceRow|null>(null);
   const [rows,setRows] = useState<VarianceRow[]>([]);
 
   useEffect(()=>{ fetchVariances().then(setRows); },[]);
@@ -282,7 +342,7 @@ export default function App(){
     filtered.forEach(r=>{
       const absVar = r.current - r.prior;
       const varPct = pct(absVar, Math.abs(r.prior)) * (absVar>=0?1:-1);
-      lines.push([r.entity, r.gl, r.description.replaceAll(',', ';'), r.prior, r.current, absVar, varPct.toFixed(2)+'%', r.thresholdPct, r.status, r.owner, r.lastUpdated].join(','));
+      lines.push([r.entity, r.gl, r.description.replace(/,/g, ';'), r.prior, r.current, absVar, varPct.toFixed(2)+'%', r.thresholdPct, r.status, r.owner, r.lastUpdated].join(','));
     })
     const blob = new Blob([lines.join('\n')], {type: 'text/csv;charset=utf-8;'});
     const url = URL.createObjectURL(blob);
@@ -311,9 +371,8 @@ export default function App(){
         <StatCard label="Entity" value={entity==='ALL'?'All':entity} sub={`As-of ${date}`} />
       </div>
       <div className="mt-4">
-        <VarianceTable rows={filtered} onOpen={(r)=>{setSelected(r); setDrawerOpen(true)}} />
+        <VarianceTable rows={filtered} />
       </div>
-      <Drawer open={drawerOpen} onClose={()=>setDrawerOpen(false)} row={selected} />
       <div className="mt-6 text-center text-xs text-gray-400">Mock API ready at /api/* (or fallback to local data).</div>
     </div>
   )
